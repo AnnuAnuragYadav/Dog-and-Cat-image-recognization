@@ -15,6 +15,12 @@ st.set_page_config(
 
 MODEL_PATH = Path(__file__).parent / "cat_dog_model.keras"
 IMAGE_SIZE = (128, 128)
+MOBILENET_SIZE = (224, 224)
+
+# ImageNet class numbers for dog breeds and cat breeds.
+DOG_CLASS_IDS = set(range(151, 269))
+CAT_CLASS_IDS = set(range(281, 286))
+CAT_DOG_CLASS_IDS = DOG_CLASS_IDS | CAT_CLASS_IDS
 
 
 st.markdown(
@@ -109,10 +115,16 @@ st.markdown(
         background:white; font-weight:700;
     }
     [data-testid="stImage"] img { border-radius:16px; }
+
     div.stButton > button[kind="primary"] {
         width:100%; border:0; border-radius:12px; min-height:3rem;
-        background:var(--violet); color:white; font-weight:800; transition:all .18s ease;
+        background:var(--violet); color:white !important; font-weight:800; transition:all .18s ease;
         box-shadow:0 7px 18px rgba(116,88,245,.2);
+    }
+    div[data-testid="stButton"] button[kind="primary"] *,
+    div[data-testid="stButton"] button[kind="primary"] span {
+        color:white !important;
+        -webkit-text-fill-color:white !important;
     }
     div.stButton > button[kind="primary"]:hover {
         background:var(--violet-dark); border:0; transform:translateY(-1px);
@@ -157,6 +169,30 @@ def load_model():
     return tf.keras.models.load_model(MODEL_PATH)
 
 
+@st.cache_resource
+def load_mobilenet():
+    return tf.keras.applications.MobileNetV2(
+        weights="imagenet",
+        include_top=True,
+        input_shape=(224, 224, 3),
+    )
+
+
+def image_has_cat_or_dog(image):
+    resized_image = image.resize(MOBILENET_SIZE)
+    image_array = np.asarray(resized_image, dtype=np.float32)[None, ...]
+    image_array = tf.keras.applications.mobilenet_v2.preprocess_input(image_array)
+
+    scores = load_mobilenet().predict(image_array, verbose=0)[0]
+    top_five = np.argsort(scores)[-5:]
+    top_five_has_pet = any(int(class_id) in CAT_DOG_CLASS_IDS for class_id in top_five)
+
+    # MobileNet ka check heuristic hai; combined score se asli pet photo
+    # galti se reject hone ka chance kam hota hai.
+    pet_probability = float(np.sum(scores[list(CAT_DOG_CLASS_IDS)]))
+    return top_five_has_pet or pet_probability >= 0.10
+
+
 try:
     model = load_model()
 except Exception as exc:
@@ -166,6 +202,7 @@ except Exception as exc:
 
 
 left, right = st.columns([1, 1], gap="large")
+
 with left:
     st.markdown('<div class="panel-title">01 · Add your photo</div>', unsafe_allow_html=True)
     st.markdown('<div class="panel-note">Choose a clear image of a cat or dog.</div>', unsafe_allow_html=True)
@@ -175,7 +212,10 @@ with left:
         label_visibility="collapsed",
         help="JPG and PNG images are supported.",
     )
-    st.markdown('<div class="upload-hint">✦ &nbsp; Best results with one pet in focus and good lighting.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="upload-hint">✦ &nbsp; Best results with one pet in focus and good lighting.</div>',
+        unsafe_allow_html=True,
+    )
 
 with right:
     st.markdown('<div class="panel-title">02 · Your result</div>', unsafe_allow_html=True)
@@ -199,32 +239,57 @@ with right:
         analyze = st.button("Analyze photo  →", type="primary", use_container_width=True)
 
         if analyze:
-            # Rescaling(1./255) is already built into the saved model.
-            resized_image = image.resize(IMAGE_SIZE)
-            image_array = np.asarray(resized_image, dtype=np.float32)[None, ...]
             try:
-                score = float(np.asarray(model.predict(image_array, verbose=0)).reshape(-1)[0])
+                with st.spinner("Checking your photo..."):
+                    is_cat_or_dog = image_has_cat_or_dog(image)
             except Exception as exc:
-                st.error("Prediction failed. Check that the model expects 128×128 RGB images.")
+                st.error("The photo check failed. Please try another image.")
                 st.exception(exc)
                 st.stop()
 
-            is_dog = score >= 0.5
-            label = "Dog" if is_dog else "Cat"
-            emoji = "🐶" if is_dog else "🐱"
-            confidence = score if is_dog else 1.0 - score
-            cat_probability = 1.0 - score
+            if not is_cat_or_dog:
+                st.warning("It only detects cat or dog photos. Please upload a cat or dog photo.")
+            else:
+                # Model ke andar Rescaling(1./255) layer pehle se hai.
+                resized_image = image.resize(IMAGE_SIZE)
+                image_array = np.asarray(resized_image, dtype=np.float32)[None, ...]
 
-            st.markdown('<div class="result-label">Pawsitive identification</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="result-name">{emoji} {label}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="result-sub">PawSight’s best guess for this photo</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="confidence-row"><span class="confidence-title">Model confidence</span>'
-                f'<span class="confidence-number">{confidence * 100:.2f}%</span></div>',
-                unsafe_allow_html=True,
-            )
-            st.progress(confidence)
-            st.markdown('<div class="prob-title">Class scores</div>', unsafe_allow_html=True)
-            st.caption(f"Cat  {cat_probability * 100:.1f}%   ·   Dog  {score * 100:.1f}%")
+                try:
+                    score = float(np.asarray(model.predict(image_array, verbose=0)).reshape(-1)[0])
+                except Exception as exc:
+                    st.error("Prediction failed. Check that the model expects 128×128 RGB images.")
+                    st.exception(exc)
+                    st.stop()
 
-st.markdown('<div class="footer-note">Made with care for curious pet people · PawSight CNN</div>', unsafe_allow_html=True)
+                is_dog = score >= 0.5
+                label = "Dog" if is_dog else "Cat"
+                emoji = "🐶" if is_dog else "🐱"
+                confidence = score if is_dog else 1.0 - score
+                cat_probability = 1.0 - score
+
+                st.markdown(
+                    '<div class="result-label">Pawsitive identification</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="result-name">{emoji} {label}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    '<div class="result-sub">PawSight’s best guess for this photo</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="confidence-row"><span class="confidence-title">Model confidence</span>'
+                    f'<span class="confidence-number">{confidence * 100:.2f}%</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.progress(confidence)
+                st.markdown('<div class="prob-title">Class scores</div>', unsafe_allow_html=True)
+                st.caption(f"Cat  {cat_probability * 100:.1f}%   ·   Dog  {score * 100:.1f}%")
+
+
+st.markdown(
+    '<div class="footer-note">Made with care for curious pet people · PawSight CNN</div>',
+    unsafe_allow_html=True,
+)
